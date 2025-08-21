@@ -17,7 +17,6 @@ type Pipe = { x: number; y: number; width: number; height: number; scored: boole
 
 export default function FlappyBird() {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const [highScore, setHighScore] = useState(0);
     const [gameOver, setGameOver] = useState(false);
     const [restartKey, setRestartKey] = useState(0);
     const [isStarted, setIsStarted] = useState(false);
@@ -112,7 +111,7 @@ export default function FlappyBird() {
             };
             // console.log('Transaction payload:', payload)
             // console.log('Transaction datum:', datum)
-            const restx = await sendCardanoTx(payload);
+            await sendCardanoTx(payload);
             // console.log('restx:', restx)
 
             // Submit to Hydra Head 
@@ -157,10 +156,6 @@ export default function FlappyBird() {
         }
         bgImage.current.onload = tryDraw;
         birdImage.current.onload = tryDraw;
-
-        // High score
-        const savedHigh = localStorage.getItem("highScore");
-        if (savedHigh) setHighScore(Number(savedHigh));
     }, []);
 
     useEffect(() => {
@@ -281,12 +276,12 @@ export default function FlappyBird() {
             }
 
             // Di chuyển ống
-            for (let p of pipes) p.x -= 3;
+            for (const p of pipes) p.x -= 3;
             if (pipes.length && pipes[0].x + pipeWidth < 0) pipes.splice(0, 2);
             if (frame % 90 === 0) createPipe();
 
             // Va chạm ống
-            for (let p of pipes) {
+            for (const p of pipes) {
                 if (
                     bird.x < p.x + p.width &&
                     bird.x + bird.width > p.x &&

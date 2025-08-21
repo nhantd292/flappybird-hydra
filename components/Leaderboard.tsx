@@ -4,8 +4,8 @@ import { datumFromHex } from '@/lib/datumProcess';
 
 type PlayerRaw = {
     name?: string;
-    score?: number;
-    best_score?: number;
+    score?: number | string;
+    best_score?: number | string;
     utc_time?: string;
 };
 
@@ -14,9 +14,13 @@ type Player = Required<Pick<PlayerRaw, 'name'>> &
         effectiveScore: number; // best_score ?? score ?? 0
     };
 
+/** UTXO item từ API: chỉ cần inlineDatumRaw */
+type SnapshotUtxo = { inlineDatumRaw?: string | null };
+type SnapshotResponse = { data?: Record<string, SnapshotUtxo> };
+
 export default function Leaderboard() {
     const [players, setPlayers] = useState<Player[]>([]);
-    const timerRef = useRef<NodeJS.Timeout | null>(null);
+    const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     useEffect(() => {
         let aborted = false;
@@ -28,31 +32,34 @@ export default function Leaderboard() {
                     { cache: 'no-store' }
                 );
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                const json = await res.json();
-                const utxos = json?.data ?? {};
+
+                const json = (await res.json()) as SnapshotResponse;
+                const utxos: Record<string, SnapshotUtxo> = json.data ?? {};
 
                 const byName = new Map<string, Player>();
 
-                for (const [, item] of Object.entries<any>(utxos)) {
-                    if (!item.inlineDatumRaw) continue;
+                // ✅ không dùng any
+                for (const item of Object.values(utxos)) {
+                    if (!item?.inlineDatumRaw) continue;
 
                     try {
-                        const d: PlayerRaw = datumFromHex(item.inlineDatumRaw);
+                        const d = datumFromHex(item.inlineDatumRaw) as PlayerRaw;
                         const name = (d?.name ?? '').trim();
                         if (!name) continue;
 
-                        // chỉ nhận item có best_score (kể cả 0); bỏ qua null/undefined/NaN
-                        const rawBest = d?.best_score as number | string | undefined | null;
+                        // chỉ nhận item có best_score (kể cả 0)
+                        const rawBest = d?.best_score;
                         if (rawBest === undefined || rawBest === null) continue;
 
-                        const best = typeof rawBest === 'string' ? Number(rawBest) : rawBest;
+                        const best =
+                            typeof rawBest === 'string' ? Number(rawBest) : rawBest;
                         if (!Number.isFinite(best)) continue;
 
                         const candidate: Player = {
                             name,
-                            best_score: best,     // chỉ dùng best_score
+                            best_score: best,
                             utc_time: d?.utc_time,
-                            effectiveScore: best, // hiệu dụng = best_score
+                            effectiveScore: best,
                         };
 
                         const cur = byName.get(name);
@@ -69,9 +76,7 @@ export default function Leaderboard() {
                     .slice(0, 10);
 
                 if (!aborted) {
-                    const curJSON = JSON.stringify(players);
-                    const nextJSON = JSON.stringify(next);
-                    if (curJSON !== nextJSON) {
+                    if (JSON.stringify(players) !== JSON.stringify(next)) {
                         setPlayers(next);
                     }
                 }
@@ -102,25 +107,18 @@ export default function Leaderboard() {
                         <span className="relative inline-flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200">
                             <span className="absolute left-1.5 h-2 w-2 animate-ping rounded-full bg-emerald-500 opacity-75" />
                             <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                            {/* Live • 3s */}
                             Live
                         </span>
-                        {/* {lastUpdated && (
-                            <span className="hidden text-xs text-gray-500 sm:block">
-                                Updated {lastUpdated.toLocaleTimeString()}
-                            </span>
-                        )} */}
                     </div>
                 </div>
 
-                {/* Top 3 highlight */}
+                {/* Top 3 */}
                 <div className="grid grid-cols-1 gap-3 px-5 sm:grid-cols-3 sm:px-6">
                     {players.slice(0, 3).map((p, i) => (
                         <TopCard key={p.name} rank={i + 1} name={p.name} score={p.effectiveScore} />
                     ))}
                 </div>
 
-                {/* Divider */}
                 <div className="mx-5 my-4 h-px bg-gradient-to-r from-transparent via-black/10 to-transparent sm:mx-6" />
 
                 {/* List */}
@@ -150,13 +148,11 @@ export default function Leaderboard() {
                                                 <p className="tabular-nums text-sm font-semibold">{p.effectiveScore}</p>
                                             </div>
 
-                                            {/* progress to top (vẫn chuẩn hoá theo topScore của toàn bảng) */}
                                             <div className="mt-1 h-2 w-full rounded-full bg-gray-100">
                                                 <div
                                                     className="h-2 rounded-full transition-all duration-500"
                                                     style={{
                                                         width: `${topScore ? Math.max(4, (p.effectiveScore / topScore) * 100) : 0}%`,
-                                                        // với rank >= 4 thì luôn dùng màu mặc định
                                                         background:
                                                             rank === 4
                                                                 ? 'linear-gradient(90deg,#f59e0b,#fbbf24)'
@@ -221,10 +217,7 @@ function TopCard({ rank, name, score }: { rank: number; name: string; score: num
                 : 'from-amber-100/80 to-orange-50/70';
 
     return (
-        <div
-            className={`rounded-xl border border-black/5 bg-gradient-to-br ${bg} p-2 shadow-md flex flex-col items-center`}
-        >
-
+        <div className={`rounded-xl border border-black/5 bg-gradient-to-br ${bg} p-2 shadow-md flex flex-col items-center`}>
             <div className="flex items-center">
                 <span className="truncate text-sm font-semibold">{name}</span>
             </div>
@@ -232,7 +225,6 @@ function TopCard({ rank, name, score }: { rank: number; name: string; score: num
                 <span className="text-2xl">{medal}</span>
             </div>
             <div className="mt-2 flex items-end justify-between">
-                {/* <span className="text-xs text-gray-500">{rank}</span> */}
                 <span className="tabular-nums text-lg font-bold">{score}</span>
             </div>
         </div>
