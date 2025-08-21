@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { TxBuilder } from '@hydra-sdk/transaction'
 import { AppWallet, deserializeTx } from '@hydra-sdk/core'
@@ -10,8 +10,6 @@ import { datumFromHex } from "@/lib/datumProcess";
 import AsyncQueue from "@/lib/queue";
 const { PlutusDatumSchema } = CardanoWASM;
 import { sendCardanoTx, type TxPayload } from '@/lib/sendCardanoTx';
-
-const now = new Date();
 
 type Pipe = { x: number; y: number; width: number; height: number; scored: boolean; image: HTMLImageElement };
 
@@ -31,6 +29,16 @@ export default function FlappyBird() {
     const bgImage = useRef<HTMLImageElement>(new Image());
     const birdImage = useRef<HTMLImageElement>(new Image());
 
+    // Wallet giữ ổn định qua các render
+    const walletRef = useRef<AppWallet | null>(null);
+    if (!walletRef.current) {
+        const words_mn: string[] = (sessionStorage.getItem("mnemonic") ?? "").split(" ");
+        walletRef.current = new AppWallet({
+            networkId: 0,
+            key: { type: 'mnemonic', words: words_mn },
+        });
+    }
+
     function playSound(sound: HTMLAudioElement | null) {
         if (sound) {
             sound.currentTime = 0;
@@ -38,46 +46,38 @@ export default function FlappyBird() {
         }
     }
 
-    const words_mn: string[] = (sessionStorage.getItem("mnemonic") ?? "").split(" ");
-    const wallet = new AppWallet({
-        networkId: 0,
-        key: {
-            type: 'mnemonic',
-            words: words_mn,
-        }
-    })
-
-    async function processHydraTransactions(curent_point: Number) {
+    // ✅ dùng number (primitive) + useCallback để ổn định deps
+    const processHydraTransactions = useCallback(async (curent_point: number) => {
+        const wallet = walletRef.current!;
         const bridge = new HydraBridge({
             url: 'wss://node-10022.hydranode.io.vn',
             verbose: true
-        })
-
+        });
 
         bridge.events.on('onConnected', async () => {
             // Get protocol parameters
-            const protocolParams = await bridge.getProtocolParameters()
+            const protocolParams = await bridge.getProtocolParameters();
 
             // Create transaction builder for Hydra
             const txBuilder = new TxBuilder({
                 isHydra: true,
                 params: protocolParams
-            })
+            });
 
             // Get UTxOs for address
-            const account = wallet.getAccount(0, 0)
-            const addressUtxos = await bridge.queryAddressUTxO(account.baseAddressBech32)
-            let best_score = curent_point
+            const account = wallet.getAccount(0, 0);
+            const addressUtxos = await bridge.queryAddressUTxO(account.baseAddressBech32);
 
+            let best_score = curent_point;
             for (const utxo of addressUtxos) {
-                const res = datumFromHex(utxo.output.inlineDatum?.to_hex())
-                if (res && typeof res === "object") {
-                    if (res.best_score !== undefined && res.best_score > best_score) {
-                        best_score = res.best_score;
-                    }
+                const decoded = datumFromHex(utxo.output.inlineDatum?.to_hex()) as { best_score?: unknown } | undefined;
+                const bs = decoded?.best_score;
+                if (typeof bs === 'number' && bs > best_score) {
+                    best_score = bs;
                 }
             }
 
+            const now = new Date();
             const datum_json = {
                 name: sessionStorage.getItem("playerName") || "Guest",
                 best_score: best_score,
@@ -87,7 +87,7 @@ export default function FlappyBird() {
             const datum = CardanoWASM.encode_json_str_to_plutus_datum(
                 JSON.stringify(datum_json),
                 PlutusDatumSchema.BasicConversions
-            )
+            );
 
             // Build transaction
             const tx = await txBuilder
@@ -95,13 +95,13 @@ export default function FlappyBird() {
                 .addLovelaceOutput(account.baseAddressBech32, '2000000')
                 .setChangeAddress(account.baseAddressBech32)
                 .txOutInlineDatumValue(datum)
-                .complete()
+                .complete();
 
             // Get transaction ID
-            const txId = deserializeTx(tx.to_hex()).transaction_hash().to_hex()
+            const txId = deserializeTx(tx.to_hex()).transaction_hash().to_hex();
 
             // Sign transaction
-            const signedTx = await wallet.signTx(tx.to_hex(), false, 0, 0)
+            const signedTx = await wallet.signTx(tx.to_hex(), false, 0, 0);
 
             const payload: TxPayload = {
                 type: 'Witnessed Tx ConwayEra',
@@ -109,23 +109,18 @@ export default function FlappyBird() {
                 description: 'Ledger Cddl Format',
                 txId: txId,
             };
-            // console.log('Transaction payload:', payload)
-            // console.log('Transaction datum:', datum)
+
             await sendCardanoTx(payload);
-            // console.log('restx:', restx)
 
-            // Submit to Hydra Head 
-            // const result = await bridge.submitTxSync({
-            //     type: 'Witnessed Tx ConwayEra',
-            //     description: 'Ledger Cddl Format',
-            //     cborHex: signedTx, // txId 
-            // }, { timeout: 30000 })
-            // console.log('Transaction successful:', result)
+            // Nếu muốn submit vào Hydra Head, bật đoạn dưới:
+            // await bridge.submitTxSync(
+            //   { type: 'Witnessed Tx ConwayEra', description: 'Ledger Cddl Format', cborHex: signedTx },
+            //   { timeout: 30000 }
+            // );
+        });
 
-        })
-
-        bridge.connect()
-    }
+        bridge.connect();
+    }, []);
 
     useEffect(() => {
         flapSound.current = new Audio("/sounds/flap.wav");
@@ -146,9 +141,9 @@ export default function FlappyBird() {
         let loaded = 0;
         function tryDraw() {
             loaded++;
-            if (loaded === 2) { // cả 2 ảnh đã load
+            if (loaded === 2) {
                 ctx.drawImage(bgImage.current, 0, 0, baseWidth, baseHeight);
-                ctx.drawImage(birdImage.current, 50, 300, 34, 34); // vẽ chim ở vị trí chờ
+                ctx.drawImage(birdImage.current, 50, 300, 34, 34);
                 ctx.fillStyle = "white";
                 ctx.font = "28px Arial";
                 ctx.fillText("Click to begin", 100, baseHeight / 2);
@@ -167,11 +162,10 @@ export default function FlappyBird() {
         canvas.width = baseWidth;
         canvas.height = baseHeight;
 
-        // ★ NEW: thêm angle để xoay, và một vài hằng số dùng cho xoay
         const bird = {
             x: 50, y: 300, width: 40, height: 34,
             gravity: 0.5, lift: -8, velocity: 0,
-            angle: 0 // ★ NEW
+            angle: 0
         };
         const pipes: Pipe[] = [];
         const pipeWidth = 70;
@@ -207,80 +201,61 @@ export default function FlappyBird() {
                 const p = pipes[i];
                 const isTop = i % 2 === 0;
 
-                const headHeight = 30; // chiều cao đầu ống
+                const headHeight = 30;
                 const bodyHeight = p.height - headHeight;
 
                 if (isTop) {
-                    // Ống trên (lật ngược)
                     ctx.save();
                     ctx.translate(p.x + p.width / 2, p.y + p.height / 2);
                     ctx.scale(1, -1);
-                    // Vẽ đầu ống
                     ctx.drawImage(p.image, -p.width / 2, -p.height / 2, p.width, headHeight);
-                    // Vẽ thân ống (dưới đầu)
                     ctx.drawImage(pipeBodyImg, -p.width / 2, -p.height / 2 + headHeight - 1, p.width, bodyHeight + 1);
                     ctx.restore();
                 } else {
-                    // Ống dưới
-                    // Vẽ đầu ống
                     ctx.drawImage(p.image, p.x, p.y, p.width, headHeight);
-                    // Vẽ thân ống
                     ctx.drawImage(pipeBodyImg, p.x, p.y + headHeight - 1, p.width, bodyHeight);
                 }
             }
 
-            // ★ NEW: Vẽ chim xoay quanh tâm theo góc bird.angle
+            // Vẽ chim có xoay
             ctx.save();
             ctx.translate(bird.x + bird.width / 2, bird.y + bird.height / 2);
             ctx.rotate(bird.angle);
-            ctx.drawImage(
-                birdImage.current,
-                -bird.width / 2,
-                -bird.height / 2,
-                bird.width,
-                bird.height
-            );
+            ctx.drawImage(birdImage.current, -bird.width / 2, -bird.height / 2, bird.width, bird.height);
             ctx.restore();
 
-            // Vẽ điểm
+            // Điểm
             ctx.fillStyle = "white";
             ctx.font = "30px Arial";
             ctx.fillText(points.toString(), 20, 50);
         }
 
         function update() {
-            // Vật lý cơ bản
             bird.velocity += bird.gravity;
 
-            // ★ NEW: giới hạn velocity để góc không quá cực đoan
-            const VMAX = 10; // tốc độ rơi tối đa (đơn vị "px/frame" tương đối)
+            const VMAX = 10;
             if (bird.velocity > VMAX) bird.velocity = VMAX;
             if (bird.velocity < -VMAX) bird.velocity = -VMAX;
 
             bird.y += bird.velocity;
 
-            // ★ NEW: chuyển velocity -> góc mục tiêu
-            const MAX_DOWN = Math.PI / 4;   // +45° khi rơi nhanh
-            const MAX_UP = -Math.PI / 6;  // -30° khi bay lên
-            const t = (bird.velocity + VMAX) / (2 * VMAX); // map [-VMAX..+VMAX] -> [0..1]
+            const MAX_DOWN = Math.PI / 4;
+            const MAX_UP = -Math.PI / 6;
+            const t = (bird.velocity + VMAX) / (2 * VMAX);
             const targetAngle = MAX_UP + (MAX_DOWN - MAX_UP) * t;
 
-            // ★ NEW: làm mượt góc
             const SMOOTH = 0.15;
             bird.angle += (targetAngle - bird.angle) * SMOOTH;
 
-            // Va chạm sàn/trần
             if (bird.y + bird.height > baseHeight || bird.y < 0) {
                 playSound(hitSound.current);
                 isGameOver = true;
             }
 
-            // Di chuyển ống
             for (const p of pipes) p.x -= 3;
             if (pipes.length && pipes[0].x + pipeWidth < 0) pipes.splice(0, 2);
             if (frame % 90 === 0) createPipe();
 
-            // Va chạm ống
             for (const p of pipes) {
                 if (
                     bird.x < p.x + p.width &&
@@ -293,7 +268,7 @@ export default function FlappyBird() {
                 }
             }
 
-            // Ghi điểm (khi qua cặp ống)
+            // Ghi điểm
             for (let i = 0; i < pipes.length; i += 2) {
                 const pipe = pipes[i];
                 if (!pipe.scored && pipe.x + pipe.width < bird.x) {
@@ -311,14 +286,11 @@ export default function FlappyBird() {
         function loop() {
             if (isGameOver) {
                 setGameOver(true);
-
-                // Vẽ màn hình Game Over
                 ctx.fillStyle = "red";
                 ctx.font = "40px Arial";
                 ctx.fillText("Game Over", 100, baseHeight / 2);
                 return;
             }
-
             update();
             draw();
             requestAnimationFrame(loop);
@@ -329,19 +301,23 @@ export default function FlappyBird() {
             playSound(flapSound.current);
         }
 
-        // Input
-        window.addEventListener("keydown", flap);
-        canvas.addEventListener("mousedown", flap, { passive: false });
-        canvas.addEventListener("touchstart", (e) => { e.preventDefault(); flap(); }, { passive: false });
+        // Handlers có reference cố định để remove được, không cần any
+        const onKeyDown = (_e: KeyboardEvent) => flap();
+        const onMouseDown = (_e: MouseEvent) => flap();
+        const onTouchStart = (e: TouchEvent) => { e.preventDefault(); flap(); };
+
+        window.addEventListener("keydown", onKeyDown);
+        canvas.addEventListener("mousedown", onMouseDown, { passive: false });
+        canvas.addEventListener("touchstart", onTouchStart, { passive: false });
 
         loop();
 
         return () => {
-            window.removeEventListener("keydown", flap);
-            canvas.removeEventListener("mousedown", flap);
-            canvas.removeEventListener("touchstart", flap as any);
+            window.removeEventListener("keydown", onKeyDown);
+            canvas.removeEventListener("mousedown", onMouseDown);
+            canvas.removeEventListener("touchstart", onTouchStart);
         };
-    }, [restartKey, isStarted]);
+    }, [restartKey, isStarted, processHydraTransactions]); // ✅ thêm processHydraTransactions
 
     function handleRestart() {
         setGameOver(false);
@@ -355,16 +331,14 @@ export default function FlappyBird() {
                 ref={canvasRef}
                 className="border-2 border-black w-full max-w-[400px] h-auto"
                 onClick={() => !isStarted && setIsStarted(true)}
-            ></canvas>
+            />
             {gameOver && (
-                <>
-                    <button
-                        onClick={handleRestart}
-                        className="mt-[-100px] px-6 py-3 bg-blue-500 text-white text-lg rounded-lg hover:bg-blue-600"
-                    >
-                        Replay
-                    </button>
-                </>
+                <button
+                    onClick={handleRestart}
+                    className="mt-[-100px] px-6 py-3 bg-blue-500 text-white text-lg rounded-lg hover:bg-blue-600"
+                >
+                    Replay
+                </button>
             )}
         </div>
     );

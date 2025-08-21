@@ -6,13 +6,30 @@ import TPSGauge from '@/components/TPSGauge';
 
 type TxItem = { id: string; ts: number; isNew: boolean };
 
+/* ---------- API types (Explorer) ---------- */
+type ExplorerItem = { txId?: unknown };
+type ExplorerResp = { data?: { items?: ExplorerItem[] } };
+
+/* ---------- Hydra message (tối thiểu đủ dùng) ---------- */
+type HydraMessage =
+    | { tag: 'HeadIsInitializing' }
+    | { tag: 'HeadIsOpen' }
+    | { tag: 'TxValid'; transactionId?: string }
+    | { tag: string;[k: string]: unknown };
+
+/* ---------- Bridge “lỏng” để dọn sạch khi unmount ---------- */
+type LooseHydraBridge = {
+    events?: { removeAllListeners?: () => void };
+    disconnect?: () => void;
+};
+
 export default function Transactions() {
     const [txList, setTxList] = useState<TxItem[]>([]);
     const bridgeRef = useRef<HydraBridge | null>(null);
     const [tps, setTps] = useState(0);
     const txCounterRef = useRef(0);
 
-    // --- Lấy 20 tx mới nhất khi load trang ---
+    // --- Lấy 10 tx mới nhất khi load trang ---
     async function fetchLatestTxs(signal?: AbortSignal) {
         try {
             const sort = encodeURIComponent(JSON.stringify([{ orderBy: "timestamp", orderType: "desc" }]));
@@ -24,19 +41,20 @@ export default function Transactions() {
                 return;
             }
 
-            const json = await res.json();
-            const items: any[] = json?.data?.items ?? [];
+            const json = (await res.json()) as ExplorerResp;
+            const items = json?.data?.items ?? [];
 
             const ids = items
-                .map(it => it?.txId)
-                .filter((id: any): id is string => typeof id === "string");
+                .map((it) => (typeof it?.txId === 'string' ? it.txId : undefined))
+                .filter((id): id is string => typeof id === "string");
 
             const now = Date.now();
-            const newItems = ids.map(id => ({ id, ts: now, isNew: false })); // API → isNew = false
+            const newItems = ids.map((id) => ({ id, ts: now, isNew: false }));
 
-            setTxList(newItems.slice(0, 10)); // giữ đúng 20 tx mới nhất
-        } catch (e: any) {
-            if (e?.name !== 'AbortError') console.error("Fetch transactions error:", e);
+            setTxList(newItems.slice(0, 10));
+        } catch (e: unknown) {
+            const err = e as { name?: string };
+            if (err?.name !== 'AbortError') console.error("Fetch transactions error:", e);
         }
     }
 
@@ -53,16 +71,20 @@ export default function Transactions() {
             bridge.commands.init();
         });
 
-        bridge.events.on('onMessage', (payload: any) => {
-            switch (payload.tag) {
+        bridge.events.on('onMessage', (payload: unknown) => {
+            const msg = payload as HydraMessage;
+
+            switch (msg.tag) {
                 case 'HeadIsInitializing':
                     console.log('Head initializing...');
                     break;
+
                 case 'HeadIsOpen':
                     console.log('Head is open and ready!');
                     break;
+
                 case 'TxValid': {
-                    const txId = payload.transactionId as string;
+                    const txId = typeof msg.transactionId === 'string' ? msg.transactionId : '';
                     if (!txId) return;
                     console.log('Transaction confirmed:', txId);
 
@@ -72,18 +94,22 @@ export default function Transactions() {
                         if (prev.find(tx => tx.id === txId)) return prev; // tránh trùng
                         const now = Date.now();
                         const newTx = { id: txId, ts: now, isNew: true };
-                        return [newTx, ...prev].slice(0, 10); // giữ tối đa 20
+                        return [newTx, ...prev].slice(0, 10);
                     });
                     break;
                 }
+
+                default:
+                    // các message khác bỏ qua
+                    break;
             }
         });
 
         bridge.connect();
     }
 
+    // reset & cập nhật TPS mỗi 2s
     useEffect(() => {
-        // reset và cập nhật TPS mỗi giây
         const interval = setInterval(() => {
             setTps(txCounterRef.current / 2);
             txCounterRef.current = 0;
@@ -91,11 +117,9 @@ export default function Transactions() {
         return () => clearInterval(interval);
     }, []);
 
-    // Trigger re-render mỗi giây để cập nhật fade effect
+    // Re-render để áp hiệu ứng fade
     useEffect(() => {
-        const interval = setInterval(() => {
-            setTxList(prev => [...prev]);
-        }, 500);
+        const interval = setInterval(() => setTxList(prev => [...prev]), 500);
         return () => clearInterval(interval);
     }, []);
 
@@ -108,26 +132,21 @@ export default function Transactions() {
 
         return () => {
             ac.abort();
-            try {
-                const b: any = bridgeRef.current;
-                b?.events?.removeAllListeners?.();
-                b?.disconnect?.();
-            } catch { /* noop */ }
+            const b = bridgeRef.current as unknown as (LooseHydraBridge | null);
+            b?.events?.removeAllListeners?.();
+            b?.disconnect?.();
             bridgeRef.current = null;
         };
     }, []);
 
     return (
         <div className="space-y-4">
+            <div className="bg-white rounded-lg shadow p-4">
+                <h2 className="font-semibold mb-2">TPS</h2>
+                <TPSGauge tps={tps} maxTPS={50} />
+            </div>
 
             <div>
-
-                <div className="bg-white rounded-lg shadow p-4">
-                    <h2 className="font-semibold mb-2">TPS</h2>
-                    <TPSGauge tps={tps} maxTPS={50} />
-                </div>
-            </div>
-            <div className="mb-2">
                 <h2 className="font-semibold mb-2">Realtime transactions</h2>
                 {txList.length === 0 ? (
                     <p className="text-sm text-gray-500">list empty.</p>
@@ -138,7 +157,7 @@ export default function Transactions() {
 
                             let backgroundColor = 'transparent';
                             if (isNew) {
-                                const elapsed = (Date.now() - ts) / 500; // 0 → 1 trong 8s
+                                const elapsed = (Date.now() - ts) / 500; // 0 → 1
                                 const clamped = Math.min(1, Math.max(0, elapsed));
                                 const bgOpacity = 0.8 * (1 - clamped); // 0.8 → 0
                                 backgroundColor = `rgba(34, 197, 94, ${bgOpacity.toFixed(2)})`;
