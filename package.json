@@ -9,13 +9,15 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@hydrawallet-sdk/bridge": "^1.0.3",
-    "@hydrawallet-sdk/cardano-wasm": "^0.0.3",
-    "@hydrawallet-sdk/core": "^0.0.5",
-    "@hydrawallet-sdk/transaction": "^0.0.5",
+    "@emurgo/cardano-serialization-lib-browser": "^15.0.0",
+    "@hydra-sdk/bridge": "^1.0.6",
+    "@hydra-sdk/cardano-wasm": "^0.0.5",
+    "@hydra-sdk/core": "^1.0.5",
+    "@hydra-sdk/transaction": "^1.0.7",
     "buffer": "^6.0.3",
     "next": "15.4.5",
     "react": "19.1.0",
+    "react-d3-speedometer": "^3.1.1",
     "react-dom": "19.1.0"
   },
   "devDependencies": {

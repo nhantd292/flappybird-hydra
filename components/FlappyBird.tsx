@@ -1,19 +1,22 @@
 'use client';
 import { useEffect, useRef, useState } from "react";
 
-import { TxBuilder } from '@hydrawallet-sdk/transaction'
-import { AppWallet, NETWORK_ID, deserializeTx } from '@hydrawallet-sdk/core'
-import { HydraBridge } from '@hydrawallet-sdk/bridge'
-import { CardanoWASM } from '@hydrawallet-sdk/cardano-wasm'
-import { time } from "console";
-const { PlutusData, PlutusDatumSchema } = CardanoWASM;
+import { TxBuilder } from '@hydra-sdk/transaction'
+import { AppWallet, deserializeTx } from '@hydra-sdk/core'
+import { HydraBridge } from '@hydra-sdk/bridge'
+import { CardanoWASM } from '@hydra-sdk/cardano-wasm'
+import { datumFromHex } from "@/lib/datumProcess";
+
+import AsyncQueue from "@/lib/queue";
+const { PlutusDatumSchema } = CardanoWASM;
+import { sendCardanoTx, type TxPayload } from '@/lib/sendCardanoTx';
+
+const now = new Date();
 
 type Pipe = { x: number; y: number; width: number; height: number; scored: boolean; image: HTMLImageElement };
 
 export default function FlappyBird() {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const [score, setScore] = useState(0);
-    const [finalScore, setFinalScore] = useState(0);
     const [highScore, setHighScore] = useState(0);
     const [gameOver, setGameOver] = useState(false);
     const [restartKey, setRestartKey] = useState(0);
@@ -22,6 +25,8 @@ export default function FlappyBird() {
     const flapSound = useRef<HTMLAudioElement | null>(null);
     const pointSound = useRef<HTMLAudioElement | null>(null);
     const hitSound = useRef<HTMLAudioElement | null>(null);
+
+    const queueRef = useRef(new AsyncQueue());
 
     // Load ảnh
     const bgImage = useRef<HTMLImageElement>(new Image());
@@ -33,58 +38,22 @@ export default function FlappyBird() {
             sound.play();
         }
     }
-    const payload = { name: "nhantd", score: finalScore, ts: Date.now() };
-    const datum = CardanoWASM.encode_json_str_to_plutus_datum(
-        JSON.stringify(payload),
-        PlutusDatumSchema.BasicConversions
-    )
-    // console.log("datum", datum)
-    // console.log("datum 2", CardanoWASM.decode_plutus_datum_to_json_str(datum, PlutusDatumSchema.BasicConversions))
 
-    async function manageHydraHead() {
+    const words_mn: string[] = (sessionStorage.getItem("mnemonic") ?? "").split(" ");
+    const wallet = new AppWallet({
+        networkId: 0,
+        key: {
+            type: 'mnemonic',
+            words: words_mn,
+        }
+    })
+
+    async function processHydraTransactions(curent_point: Number) {
         const bridge = new HydraBridge({
             url: 'wss://node-10022.hydranode.io.vn',
             verbose: true
         })
 
-        // Set up event handlers
-        bridge.events.on('onConnected', async () => {
-            console.log('Connected! Initializing Head...')
-            bridge.commands.init()
-        })
-
-        bridge.events.on('onMessage', (payload) => {
-            switch (payload.tag) {
-                case 'HeadIsInitializing':
-                    console.log('Head initializing...')
-                    break
-                case 'HeadIsOpen':
-                    console.log('Head is open and ready!')
-                    break
-                case 'TxValid':
-                    console.log('Transaction confirmed:', payload.transactionId)
-                    break
-            }
-        })
-
-        // Connect to start the process
-        bridge.connect()
-    }
-
-
-    async function processHydraTransactions() {
-        const bridge = new HydraBridge({
-            url: 'wss://node-10022.hydranode.io.vn',
-            verbose: true
-        })
-
-        const wallet = new AppWallet({
-            networkId: 0,
-            key: {
-                type: 'mnemonic',
-                words: ['gloom', 'turkey', 'alcohol', 'outer', 'diet', 'capable', 'album', 'blame', 'hobby', 'depend', 'rebuild', 'ecology', 'metal', 'display', 'clerk', 'million', 'pistol', 'project', 'palace', 'cricket', 'country', 'tag', 'consider', 'tray'] // 12, 15, or 24 words
-            }
-        })
 
         bridge.events.on('onConnected', async () => {
             // Get protocol parameters
@@ -99,6 +68,27 @@ export default function FlappyBird() {
             // Get UTxOs for address
             const account = wallet.getAccount(0, 0)
             const addressUtxos = await bridge.queryAddressUTxO(account.baseAddressBech32)
+            let best_score = curent_point
+
+            for (const utxo of addressUtxos) {
+                const res = datumFromHex(utxo.output.inlineDatum?.to_hex())
+                if (res && typeof res === "object") {
+                    if (res.best_score !== undefined && res.best_score > best_score) {
+                        best_score = res.best_score;
+                    }
+                }
+            }
+
+            const datum_json = {
+                name: sessionStorage.getItem("playerName") || "Guest",
+                best_score: best_score,
+                score: curent_point,
+                utc_time: now.toISOString()
+            };
+            const datum = CardanoWASM.encode_json_str_to_plutus_datum(
+                JSON.stringify(datum_json),
+                PlutusDatumSchema.BasicConversions
+            )
 
             // Build transaction
             const tx = await txBuilder
@@ -114,54 +104,31 @@ export default function FlappyBird() {
             // Sign transaction
             const signedTx = await wallet.signTx(tx.to_hex(), false, 0, 0)
 
+            const payload: TxPayload = {
+                type: 'Witnessed Tx ConwayEra',
+                cborHex: signedTx,
+                description: 'Ledger Cddl Format',
+                txId: txId,
+            };
+            // console.log('Transaction payload:', payload)
+            // console.log('Transaction datum:', datum)
+            const restx = await sendCardanoTx(payload);
+            // console.log('restx:', restx)
 
-            // console.log('Transaction:', {
+            // Submit to Hydra Head 
+            // const result = await bridge.submitTxSync({
             //     type: 'Witnessed Tx ConwayEra',
             //     description: 'Ledger Cddl Format',
-            //     cborHex: signedTx,
-            //     txId
-            // })
+            //     cborHex: signedTx, // txId 
+            // }, { timeout: 30000 })
+            // console.log('Transaction successful:', result)
 
-            // Submit to Hydra Head
-            const result = await bridge.submitTxSync({
-                type: 'Witnessed Tx ConwayEra',
-                description: 'Ledger Cddl Format',
-                cborHex: signedTx,
-                txId
-            }, { timeout: 30000 })
-
-            console.log('Transaction successful:', result)
         })
 
         bridge.connect()
     }
 
-
-    async function submitScore(finalScore: number) {
-        const name = sessionStorage.getItem("playerName") || "Guest"; // Lấy tên người chơi đã nhập
-        await fetch("/api/score", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name, score: finalScore }),
-        });
-    }
-
     useEffect(() => {
-        if (!gameOver) return;
-
-        (async () => {
-            try {
-                await processHydraTransactions();
-            } catch (e) {
-                console.error("Submit to Hydra failed:", e);
-            }
-        })();
-    }, [gameOver, finalScore]);
-
-
-    useEffect(() => {
-
-        manageHydraHead()
         flapSound.current = new Audio("/sounds/flap.wav");
         pointSound.current = new Audio("/sounds/point.wav");
         hitSound.current = new Audio("/sounds/hit.wav");
@@ -205,21 +172,21 @@ export default function FlappyBird() {
         canvas.width = baseWidth;
         canvas.height = baseHeight;
 
-        const bird = { x: 50, y: 300, width: 34, height: 34, gravity: 0.5, lift: -8, velocity: 0 };
+        // ★ NEW: thêm angle để xoay, và một vài hằng số dùng cho xoay
+        const bird = {
+            x: 50, y: 300, width: 40, height: 34,
+            gravity: 0.5, lift: -8, velocity: 0,
+            angle: 0 // ★ NEW
+        };
         const pipes: Pipe[] = [];
         const pipeWidth = 70;
-        const gap = 150;
+        const gap = 135;
         let frame = 0;
         let points = 0;
         let isGameOver = false;
 
         const pipeImages = [
-            "/images/pipes/pipe_head_btc.png",
-            "/images/pipes/pipe_head_eth.png",
-            "/images/pipes/pipe_head_bnb.png",
-            "/images/pipes/pipe_head_txr.png",
-            "/images/pipes/pipe_head_xrp.png",
-            "/images/pipes/pipe_head_sol.png"
+            "/images/pipes/pipe_head.png"
         ].map(src => {
             const img = new Image();
             img.src = src;
@@ -228,12 +195,11 @@ export default function FlappyBird() {
 
         function createPipe() {
             const top = Math.random() * (baseHeight - gap - 100) + 50;
-            const img = pipeImages[Math.floor(Math.random() * pipeImages.length)];
+            const img = pipeImages[0];
             pipes.push({ x: baseWidth, y: 0, width: pipeWidth, height: top, scored: false, image: img });
             pipes.push({ x: baseWidth, y: top + gap, width: pipeWidth, height: baseHeight - (top + gap), scored: false, image: img });
         }
 
-        // const pipeHeadImg = new Image();
         const pipeBodyImg = new Image();
         pipeBodyImg.src = "/images/pipes/pipe_body.png";
 
@@ -246,7 +212,7 @@ export default function FlappyBird() {
                 const p = pipes[i];
                 const isTop = i % 2 === 0;
 
-                const headHeight = 80; // chiều cao đầu ống
+                const headHeight = 30; // chiều cao đầu ống
                 const bodyHeight = p.height - headHeight;
 
                 if (isTop) {
@@ -268,8 +234,18 @@ export default function FlappyBird() {
                 }
             }
 
-            // Vẽ chim
-            ctx.drawImage(birdImage.current, bird.x, bird.y, bird.width, bird.height);
+            // ★ NEW: Vẽ chim xoay quanh tâm theo góc bird.angle
+            ctx.save();
+            ctx.translate(bird.x + bird.width / 2, bird.y + bird.height / 2);
+            ctx.rotate(bird.angle);
+            ctx.drawImage(
+                birdImage.current,
+                -bird.width / 2,
+                -bird.height / 2,
+                bird.width,
+                bird.height
+            );
+            ctx.restore();
 
             // Vẽ điểm
             ctx.fillStyle = "white";
@@ -278,17 +254,38 @@ export default function FlappyBird() {
         }
 
         function update() {
+            // Vật lý cơ bản
             bird.velocity += bird.gravity;
+
+            // ★ NEW: giới hạn velocity để góc không quá cực đoan
+            const VMAX = 10; // tốc độ rơi tối đa (đơn vị "px/frame" tương đối)
+            if (bird.velocity > VMAX) bird.velocity = VMAX;
+            if (bird.velocity < -VMAX) bird.velocity = -VMAX;
+
             bird.y += bird.velocity;
+
+            // ★ NEW: chuyển velocity -> góc mục tiêu
+            const MAX_DOWN = Math.PI / 4;   // +45° khi rơi nhanh
+            const MAX_UP = -Math.PI / 6;  // -30° khi bay lên
+            const t = (bird.velocity + VMAX) / (2 * VMAX); // map [-VMAX..+VMAX] -> [0..1]
+            const targetAngle = MAX_UP + (MAX_DOWN - MAX_UP) * t;
+
+            // ★ NEW: làm mượt góc
+            const SMOOTH = 0.15;
+            bird.angle += (targetAngle - bird.angle) * SMOOTH;
+
+            // Va chạm sàn/trần
             if (bird.y + bird.height > baseHeight || bird.y < 0) {
                 playSound(hitSound.current);
                 isGameOver = true;
             }
 
+            // Di chuyển ống
             for (let p of pipes) p.x -= 3;
             if (pipes.length && pipes[0].x + pipeWidth < 0) pipes.splice(0, 2);
             if (frame % 90 === 0) createPipe();
 
+            // Va chạm ống
             for (let p of pipes) {
                 if (
                     bird.x < p.x + p.width &&
@@ -301,13 +298,16 @@ export default function FlappyBird() {
                 }
             }
 
+            // Ghi điểm (khi qua cặp ống)
             for (let i = 0; i < pipes.length; i += 2) {
                 const pipe = pipes[i];
                 if (!pipe.scored && pipe.x + pipe.width < bird.x) {
                     points++;
                     pipe.scored = true;
-                    setScore(points);
                     playSound(pointSound.current);
+                    queueRef.current.enqueue(async () => {
+                        await processHydraTransactions(points);
+                    });
                 }
             }
             frame++;
@@ -316,45 +316,39 @@ export default function FlappyBird() {
         function loop() {
             if (isGameOver) {
                 setGameOver(true);
-                setFinalScore(points);
 
-                // Gửi điểm lên server
-                submitScore(points);
-
-                if (points > highScore) {
-                    localStorage.setItem("highScore", points.toString());
-                    setHighScore(points);
-                }
+                // Vẽ màn hình Game Over
                 ctx.fillStyle = "red";
                 ctx.font = "40px Arial";
                 ctx.fillText("Game Over", 100, baseHeight / 2);
                 return;
             }
+
             update();
             draw();
             requestAnimationFrame(loop);
         }
 
         function flap() {
-            bird.velocity = bird.lift;
+            bird.velocity = Math.max(bird.lift, -10);
             playSound(flapSound.current);
         }
 
+        // Input
         window.addEventListener("keydown", flap);
-        canvas.addEventListener("mousedown", flap);
-        canvas.addEventListener("touchstart", flap);
+        canvas.addEventListener("mousedown", flap, { passive: false });
+        canvas.addEventListener("touchstart", (e) => { e.preventDefault(); flap(); }, { passive: false });
+
         loop();
 
         return () => {
             window.removeEventListener("keydown", flap);
             canvas.removeEventListener("mousedown", flap);
-            canvas.removeEventListener("touchstart", flap);
+            canvas.removeEventListener("touchstart", flap as any);
         };
     }, [restartKey, isStarted]);
 
     function handleRestart() {
-        setScore(0);
-        setFinalScore(0);
         setGameOver(false);
         setIsStarted(false);
         setRestartKey(prev => prev + 1);
@@ -367,14 +361,11 @@ export default function FlappyBird() {
                 className="border-2 border-black w-full max-w-[400px] h-auto"
                 onClick={() => !isStarted && setIsStarted(true)}
             ></canvas>
-            {/* <p className="mt-2 text-lg font-semibold">Điểm cao nhất: {highScore}</p> */}
-            {/* {isStarted && !gameOver && <p className="mt-2 text-xl font-bold">Điểm hiện tại: {score}</p>} */}
             {gameOver && (
                 <>
-                    {/* <p className="mt-2 text-2xl font-bold text-red-600">Game Over – Điểm của bạn: {finalScore}</p> */}
                     <button
                         onClick={handleRestart}
-                        className="mt-4 px-6 py-3 bg-blue-500 text-white text-lg rounded-lg hover:bg-blue-600"
+                        className="mt-[-100px] px-6 py-3 bg-blue-500 text-white text-lg rounded-lg hover:bg-blue-600"
                     >
                         Replay
                     </button>

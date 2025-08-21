@@ -15,8 +15,8 @@ export default function Stats() {
 
     return (
         <div>
-            <p className="text-lg">User online: {players}</p>
-            <p className="text-lg">TPS: {tps}</p>
+            <p className="text-sm">User online: {players}</p>
+            <p className="text-sm">TPS: {tps}</p>
         </div>
     );
 }
